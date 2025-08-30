@@ -1,0 +1,7 @@
+# 語音轉文字程式所需套件
+SpeechRecognition==3.10.0
+pyaudio>=0.2.11
+python-docx>=0.8.11
+pydub>=0.25.1
+openai-whisper>=20231117
+tkinter  # 通常內建於Python中
