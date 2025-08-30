@@ -3,7 +3,7 @@ echo 正在安裝語音轉文字程式所需套件...
 echo.
 
 REM 設定Python路徑
-set PYTHON_PATH="C:/Users/蔡昌諺/AppData/Local/Programs/Python/Python310/python.exe"
+set PYTHON_PATH="C:/Users/AppData/Local/Programs/Python/Python310/python.exe"
 
 REM 升級pip
 %PYTHON_PATH% -m pip install --upgrade pip
@@ -25,3 +25,4 @@ echo 1. speech_to_text.py （完整版，支援Whisper）
 echo 2. simple_speech_to_text.py （簡化版，僅使用Google API）
 echo.
 pause
+
