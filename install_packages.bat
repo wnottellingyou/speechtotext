@@ -5,7 +5,7 @@ echo ====================================
 echo.
 
 rem 使用Python 3.10環境
-set PYTHON_PATH="C:/Users/蔡昌諺/AppData/Local/Programs/Python/Python310/python.exe"
+set PYTHON_PATH="C:/Users/AppData/Local/Programs/Python/Python310/python.exe"
 
 echo 使用Python環境: %PYTHON_PATH%
 echo.
@@ -53,3 +53,4 @@ echo 現在可以運行語音轉文字程式了：
 echo 請使用 start_app.bat 啟動程式
 echo.
 pause
+
