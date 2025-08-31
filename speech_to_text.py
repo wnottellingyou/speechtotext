@@ -31,12 +31,16 @@ class SpeechToTextApp:
         
         # 初始化變數
         self.is_recording = False
+        self.is_paused = False  # 新增暫停狀態
+        self.recording_thread = None  # 錄音線程引用
         self.audio_data = None
         self.recognizer = sr.Recognizer()
         self.microphone = sr.Microphone()
         self.whisper_model = None
         self.recording_segments = []  # 存儲多段錄音
         self.recording_start_time = None
+        self.pause_start_time = None  # 暫停開始時間
+        self.total_pause_time = 0  # 總暫停時間
         self.temp_files = []  # 追蹤臨時檔案
         self.audio_files = []  # 存儲多個音訊檔案的資訊 [{'path': '', 'name': '', 'order': int}]
         self.current_processing_index = 0  # 目前處理的檔案索引
@@ -128,6 +132,12 @@ class SpeechToTextApp:
             if self.is_recording:
                 self.is_recording = False
             
+            # 重置錄音狀態
+            self.is_paused = False
+            self.recording_thread = None
+            self.pause_start_time = None
+            self.total_pause_time = 0
+            
             # 清空音訊資料
             self.audio_data = None
             self.recording_segments = []
@@ -141,7 +151,10 @@ class SpeechToTextApp:
             
             # 重置UI狀態
             self.root.after(0, self.update_record_status, "已重置")
-            self.root.after(0, lambda: self.record_button.config(text="開始錄音"))
+            self.root.after(0, lambda: self.record_button.config(state="normal"))
+            self.root.after(0, lambda: self.pause_button.config(state="disabled"))
+            self.root.after(0, lambda: self.resume_button.config(state="disabled"))
+            self.root.after(0, lambda: self.stop_button.config(state="disabled"))
             self.root.after(0, lambda: self.clear_audio_files())  # 清空檔案列表
             self.root.after(0, lambda: self.text_result.delete(1.0, tk.END))
             
@@ -166,15 +179,28 @@ class SpeechToTextApp:
         record_frame = ttk.LabelFrame(main_frame, text="語音錄製", padding="10")
         record_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
         
-        self.record_button = ttk.Button(record_frame, text="開始錄音", command=self.toggle_recording)
-        self.record_button.grid(row=0, column=0, padx=(0, 10))
+        # 錄音控制按鈕區域
+        button_frame = ttk.Frame(record_frame)
+        button_frame.grid(row=0, column=0, columnspan=2, pady=(0, 10))
+        
+        self.record_button = ttk.Button(button_frame, text="開始錄音", command=self.start_recording)
+        self.record_button.grid(row=0, column=0, padx=(0, 5))
+        
+        self.pause_button = ttk.Button(button_frame, text="暫停錄音", command=self.pause_recording, state="disabled")
+        self.pause_button.grid(row=0, column=1, padx=(0, 5))
+        
+        self.resume_button = ttk.Button(button_frame, text="繼續錄音", command=self.resume_recording, state="disabled")
+        self.resume_button.grid(row=0, column=2, padx=(0, 5))
+        
+        self.stop_button = ttk.Button(button_frame, text="結束錄音", command=self.stop_recording, state="disabled")
+        self.stop_button.grid(row=0, column=3)
         
         self.record_status = ttk.Label(record_frame, text="準備錄音")
-        self.record_status.grid(row=0, column=1)
+        self.record_status.grid(row=1, column=0, columnspan=2, pady=(5, 0))
         
         # 錄音設定
         settings_frame = ttk.Frame(record_frame)
-        settings_frame.grid(row=1, column=0, columnspan=2, pady=(10, 0))
+        settings_frame.grid(row=2, column=0, columnspan=2, pady=(10, 0))
         
         ttk.Label(settings_frame, text="錄音模式：").grid(row=0, column=0, sticky=tk.W)
         self.record_mode_var = tk.StringVar(value="continuous")
@@ -312,35 +338,98 @@ class SpeechToTextApp:
         upload_frame.columnconfigure(0, weight=1)
         result_frame.rowconfigure(0, weight=1)
     
-    def toggle_recording(self):
-        """切換錄音狀態"""
-        if not self.is_recording:
-            self.start_recording()
-        else:
-            self.stop_recording()
-    
     def start_recording(self):
         """開始錄音"""
+        if self.is_recording:
+            return
+            
         self.is_recording = True
-        self.record_button.config(text="停止錄音")
+        self.is_paused = False
+        self.recording_segments = []
+        self.recording_start_time = time.time()
+        self.total_pause_time = 0
+        
+        # 更新按鈕狀態
+        self.record_button.config(state="disabled")
+        self.pause_button.config(state="normal")
+        self.resume_button.config(state="disabled")
+        self.stop_button.config(state="normal")
         self.record_status.config(text="正在錄音...")
         
         # 在新線程中錄音
-        threading.Thread(target=self.record_audio, daemon=True).start()
+        self.recording_thread = threading.Thread(target=self.record_audio, daemon=True)
+        self.recording_thread.start()
+    
+    def pause_recording(self):
+        """暫停錄音"""
+        if not self.is_recording or self.is_paused:
+            return
+            
+        self.is_paused = True
+        self.pause_start_time = time.time()
+        
+        # 更新按鈕狀態
+        self.pause_button.config(state="disabled")
+        self.resume_button.config(state="normal")
+        self.record_status.config(text="錄音已暫停")
+        
+        print("錄音已暫停")
+    
+    def resume_recording(self):
+        """繼續錄音"""
+        if not self.is_recording or not self.is_paused:
+            return
+            
+        # 計算暫停時間
+        if self.pause_start_time:
+            self.total_pause_time += time.time() - self.pause_start_time
+            self.pause_start_time = None
+        
+        self.is_paused = False
+        
+        # 更新按鈕狀態
+        self.pause_button.config(state="normal")
+        self.resume_button.config(state="disabled")
+        self.record_status.config(text="正在錄音...")
+        
+        print("錄音已繼續")
     
     def stop_recording(self):
-        """停止錄音"""
+        """結束錄音"""
+        if not self.is_recording:
+            return
+            
+        # 如果正在暫停，先計算暫停時間
+        if self.is_paused and self.pause_start_time:
+            self.total_pause_time += time.time() - self.pause_start_time
+            self.pause_start_time = None
+        
         self.is_recording = False
-        self.record_button.config(text="開始錄音")
-        self.record_status.config(text="錄音已停止")
+        self.is_paused = False
+        
+        # 更新按鈕狀態
+        self.record_button.config(state="normal")
+        self.pause_button.config(state="disabled")
+        self.resume_button.config(state="disabled")
+        self.stop_button.config(state="disabled")
+        
+        # 等待錄音線程結束
+        if self.recording_thread and self.recording_thread.is_alive():
+            self.recording_thread.join(timeout=2)
+        
+        # 計算實際錄音時間（扣除暫停時間）
+        if self.recording_start_time:
+            total_time = time.time() - self.recording_start_time
+            actual_recording_time = total_time - self.total_pause_time
+            self.record_status.config(text=f"錄音已結束 (實際錄音: {actual_recording_time:.1f}秒)")
+        else:
+            self.record_status.config(text="錄音已結束")
+        
+        print("錄音已結束")
     
     def record_audio(self):
         """錄音函數"""
         try:
-            # 重置錄音數據
-            self.recording_segments = []
-            self.recording_start_time = time.time()
-            
             with self.microphone as source:
                 self.recognizer.adjust_for_ambient_noise(source, duration=1)
             
@@ -751,6 +840,11 @@ class SpeechToTextApp:
         """連續錄音模式"""
         segment_count = 0
         while self.is_recording:
+            # 如果暫停，則等待
+            if self.is_paused:
+                time.sleep(0.1)
+                continue
+                
             try:
                 with self.microphone as source:
                     # 錄製音訊段落（允許較長的靜音間隔）
@@ -759,19 +853,27 @@ class SpeechToTextApp:
                         timeout=1, 
                         phrase_time_limit=None  # 移除短語時間限制
                     )
-                    self.recording_segments.append(audio)
-                    segment_count += 1
                     
-                    # 更新狀態 - 修復lambda變量捕獲問題
-                    elapsed_time = time.time() - self.recording_start_time
-                    status_text = f"錄音中... {segment_count}段 ({elapsed_time:.1f}秒)"
-                    self.root.after(0, self.update_record_status, status_text)
+                    # 檢查是否還在錄音且未暫停
+                    if self.is_recording and not self.is_paused:
+                        self.recording_segments.append(audio)
+                        segment_count += 1
+                        
+                        # 更新狀態
+                        elapsed_time = time.time() - self.recording_start_time - self.total_pause_time
+                        if self.pause_start_time:  # 如果正在暫停中
+                            current_pause = time.time() - self.pause_start_time
+                            elapsed_time -= current_pause
+                        
+                        status_text = f"錄音中... {segment_count}段 (有效時間: {elapsed_time:.1f}秒)"
+                        self.root.after(0, self.update_record_status, status_text)
                     
             except sr.WaitTimeoutError:
                 # 超時時繼續等待，不結束錄音
                 continue
             except Exception as e:
-                print(f"錄音段落錯誤: {e}")
+                if self.is_recording:  # 只在仍在錄音時顯示錯誤
+                    print(f"錄音段落錯誤: {e}")
                 continue
         
         # 合併所有錄音段落
@@ -781,17 +883,28 @@ class SpeechToTextApp:
     def single_recording(self):
         """單句錄音模式"""
         try:
+            # 等待直到不是暫停狀態
+            while self.is_recording and self.is_paused:
+                time.sleep(0.1)
+            
+            if not self.is_recording:
+                return
+                
             with self.microphone as source:
                 # 單次錄音，較短的超時時間
                 audio = self.recognizer.listen(source, timeout=10, phrase_time_limit=10)
-                self.audio_data = audio
                 
-                # 自動停止錄音
-                self.root.after(0, self.stop_recording)
+                # 檢查是否還在錄音且未暫停
+                if self.is_recording and not self.is_paused:
+                    self.audio_data = audio
+                    
+                    # 自動停止錄音
+                    self.root.after(0, self.stop_recording)
                 
         except sr.WaitTimeoutError:
-            self.root.after(0, self.update_record_status, "錄音超時")
-            self.root.after(0, self.stop_recording)
+            if self.is_recording:  # 只在仍在錄音時顯示超時
+                self.root.after(0, self.update_record_status, "錄音超時")
+                self.root.after(0, self.stop_recording)
     
     def merge_audio_segments(self):
         """合併多個錄音段落"""
