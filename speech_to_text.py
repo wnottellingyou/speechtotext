@@ -7,35 +7,79 @@
 2. 上傳音訊檔案並轉換為文字
 3. 支援中英文識別
 4. 導出為docx或txt格式
+5. AI智能摘要分析
 """
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-import speech_recognition as sr
-import pyaudio
-import wave
 import threading
 import os
 from datetime import datetime
-from docx import Document
-import whisper
-from pydub import AudioSegment
 import tempfile
 import time
+import json
+import re
+
+# 條件導入可能缺少的套件
+try:
+    import speech_recognition as sr
+    SPEECH_RECOGNITION_AVAILABLE = True
+except ImportError:
+    SPEECH_RECOGNITION_AVAILABLE = False
+    sr = None
+
+try:
+    import pyaudio
+    PYAUDIO_AVAILABLE = True
+except ImportError:
+    PYAUDIO_AVAILABLE = False
+
+try:
+    import wave
+    WAVE_AVAILABLE = True
+except ImportError:
+    WAVE_AVAILABLE = False
+
+try:
+    from docx import Document
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 class SpeechToTextApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("語音轉文字程式")
-        self.root.geometry("800x600")
+        self.root.title("語音轉文字程式 - 含AI摘要功能")
+        self.root.geometry("1200x800")  # 增加窗口大小以容納更多內容
+        
+        # 檢查必要套件
+        self.check_dependencies()
         
         # 初始化變數
         self.is_recording = False
         self.is_paused = False  # 新增暫停狀態
         self.recording_thread = None  # 錄音線程引用
         self.audio_data = None
-        self.recognizer = sr.Recognizer()
-        self.microphone = sr.Microphone()
+        self.recognizer = sr.Recognizer() if SPEECH_RECOGNITION_AVAILABLE else None
+        self.microphone = sr.Microphone() if SPEECH_RECOGNITION_AVAILABLE and PYAUDIO_AVAILABLE else None
         self.whisper_model = None
         self.recording_segments = []  # 存儲多段錄音
         self.recording_start_time = None
@@ -47,17 +91,56 @@ class SpeechToTextApp:
         self.total_elapsed_time = 0  # 累計時間（秒）
         self.enable_timestamps = False  # 是否啟用時間戳
         
+        # AI摘要相關變數
+        self.openai_api_key = ""  # OpenAI API密鑰
+        self.ai_summary_result = ""  # AI摘要結果
+        self.enable_ai_summary = False  # 是否啟用AI摘要
+        
         # 載入Whisper模型
-        self.load_whisper_model()
+        if WHISPER_AVAILABLE:
+            self.load_whisper_model()
         
         # 建立UI
         self.create_widgets()
         
         # 調整麥克風
-        self.adjust_microphone()
+        if SPEECH_RECOGNITION_AVAILABLE and PYAUDIO_AVAILABLE:
+            self.adjust_microphone()
+    
+    def check_dependencies(self):
+        """檢查並顯示缺少的套件"""
+        missing_packages = []
+        
+        if not SPEECH_RECOGNITION_AVAILABLE:
+            missing_packages.append("speech_recognition")
+        if not PYAUDIO_AVAILABLE:
+            missing_packages.append("pyaudio")
+        if not DOCX_AVAILABLE:
+            missing_packages.append("python-docx")
+        if not WHISPER_AVAILABLE:
+            missing_packages.append("openai-whisper")
+        if not PYDUB_AVAILABLE:
+            missing_packages.append("pydub")
+        if not OPENAI_AVAILABLE:
+            missing_packages.append("openai")
+        
+        if missing_packages:
+            message = f"警告：以下套件未安裝，部分功能可能無法使用：\n\n"
+            for pkg in missing_packages:
+                message += f"• {pkg}\n"
+            message += f"\n安裝命令：\n"
+            message += f"pip install {' '.join(missing_packages)}\n\n"
+            message += f"程式將以有限功能模式運行。"
+            
+            # 延遲顯示消息，讓GUI完全載入
+            self.root.after(1000, lambda: messagebox.showwarning("套件檢查", message))
     
     def load_whisper_model(self):
         """載入Whisper模型"""
+        if not WHISPER_AVAILABLE:
+            print("Whisper套件未安裝，跳過模型載入")
+            return
+            
         try:
             print("載入Whisper模型中...")
             self.whisper_model = whisper.load_model("base")
@@ -68,6 +151,10 @@ class SpeechToTextApp:
     
     def adjust_microphone(self):
         """調整麥克風"""
+        if not SPEECH_RECOGNITION_AVAILABLE or not PYAUDIO_AVAILABLE:
+            print("語音識別套件未安裝，跳過麥克風調整")
+            return
+            
         try:
             with self.microphone as source:
                 self.recognizer.adjust_for_ambient_noise(source)
@@ -146,6 +233,9 @@ class SpeechToTextApp:
             self.current_processing_index = 0
             self.total_elapsed_time = 0  # 重置累計時間
             
+            # 重置AI相關狀態
+            self.ai_summary_result = ""
+            
             # 清理臨時檔案
             self.cleanup_temp_files()
             
@@ -157,6 +247,7 @@ class SpeechToTextApp:
             self.root.after(0, lambda: self.stop_button.config(state="disabled"))
             self.root.after(0, lambda: self.clear_audio_files())  # 清空檔案列表
             self.root.after(0, lambda: self.text_result.delete(1.0, tk.END))
+            self.root.after(0, lambda: self.clear_ai_summary())  # 清空AI摘要
             
             print("系統已重置")
             return True
@@ -172,12 +263,21 @@ class SpeechToTextApp:
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # 標題
-        title_label = ttk.Label(main_frame, text="語音轉文字程式", font=("Arial", 16, "bold"))
-        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+        title_label = ttk.Label(main_frame, text="語音轉文字程式 - 含AI摘要功能", font=("Arial", 16, "bold"))
+        title_label.grid(row=0, column=0, columnspan=4, pady=(0, 20))
+        
+        # 建立左右兩欄佈局
+        left_frame = ttk.Frame(main_frame)
+        left_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
+        
+        right_frame = ttk.Frame(main_frame)
+        right_frame.grid(row=1, column=2, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(10, 0))
+        
+        # ==================== 左側區域 ====================
         
         # 錄音區域
-        record_frame = ttk.LabelFrame(main_frame, text="語音錄製", padding="10")
-        record_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        record_frame = ttk.LabelFrame(left_frame, text="語音錄製", padding="10")
+        record_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
         
         # 錄音控制按鈕區域
         button_frame = ttk.Frame(record_frame)
@@ -208,8 +308,8 @@ class SpeechToTextApp:
         ttk.Radiobutton(settings_frame, text="單句錄音", variable=self.record_mode_var, value="single").grid(row=0, column=2)
         
         # 檔案上傳區域
-        upload_frame = ttk.LabelFrame(main_frame, text="音訊檔案管理", padding="10")
-        upload_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        upload_frame = ttk.LabelFrame(left_frame, text="音訊檔案管理", padding="10")
+        upload_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         
         # 檔案操作按鈕
         file_buttons_frame = ttk.Frame(upload_frame)
@@ -240,7 +340,7 @@ class SpeechToTextApp:
         # 設定欄位寬度
         self.file_tree.column("順序", width=60, anchor=tk.CENTER)
         self.file_tree.column("檔案名稱", width=200)
-        self.file_tree.column("路徑", width=300)
+        self.file_tree.column("路徑", width=250)
         
         # 捲軸
         file_scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.file_tree.yview)
@@ -259,16 +359,16 @@ class SpeechToTextApp:
         ttk.Button(order_frame, text="移除選中", command=self.remove_selected).grid(row=0, column=2)
         
         # 識別引擎選擇
-        engine_frame = ttk.LabelFrame(main_frame, text="識別引擎", padding="10")
-        engine_frame.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        engine_frame = ttk.LabelFrame(left_frame, text="識別引擎", padding="10")
+        engine_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
         
         self.engine_var = tk.StringVar(value="google")
         ttk.Radiobutton(engine_frame, text="Google (需網路)", variable=self.engine_var, value="google").grid(row=0, column=0, padx=(0, 10))
         ttk.Radiobutton(engine_frame, text="Whisper (離線)", variable=self.engine_var, value="whisper").grid(row=0, column=1)
         
         # 語言選擇
-        lang_frame = ttk.LabelFrame(main_frame, text="語言設定", padding="10")
-        lang_frame.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        lang_frame = ttk.LabelFrame(left_frame, text="語言設定", padding="10")
+        lang_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
         
         self.language_var = tk.StringVar(value="zh-TW")
         ttk.Radiobutton(lang_frame, text="中文", variable=self.language_var, value="zh-TW").grid(row=0, column=0, padx=(0, 10))
@@ -276,14 +376,14 @@ class SpeechToTextApp:
         ttk.Radiobutton(lang_frame, text="自動", variable=self.language_var, value="auto").grid(row=0, column=2)
         
         # 進階選項
-        options_frame = ttk.LabelFrame(main_frame, text="進階選項", padding="10")
-        options_frame.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        options_frame = ttk.LabelFrame(left_frame, text="進階選項", padding="10")
+        options_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
         
         # 時間戳選項
         self.timestamp_var = tk.BooleanVar(value=False)
         timestamp_check = ttk.Checkbutton(
             options_frame, 
-            text="啟用逐字時間戳（顯示每句話的起始時間）", 
+            text="啟用逐字時間戳", 
             variable=self.timestamp_var,
             command=self.toggle_timestamp_option
         )
@@ -292,51 +392,141 @@ class SpeechToTextApp:
         # 時間戳格式說明
         self.timestamp_info = ttk.Label(
             options_frame, 
-            text="時間戳格式：[MM:SS] 或 [HH:MM:SS]，多檔案時間會自動累加",
+            text="格式：[MM:SS] 或 [HH:MM:SS]",
             font=("Arial", 8),
             foreground="gray"
         )
         self.timestamp_info.grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
         
+        # AI摘要選項
+        self.ai_summary_var = tk.BooleanVar(value=False)
+        ai_summary_check = ttk.Checkbutton(
+            options_frame,
+            text="啟用AI智能摘要",
+            variable=self.ai_summary_var,
+            command=self.toggle_ai_summary_option
+        )
+        ai_summary_check.grid(row=2, column=0, sticky=tk.W, pady=(10, 0))
+        
+        # AI摘要說明
+        self.ai_summary_info = ttk.Label(
+            options_frame,
+            text="分析主題領域、研究方法、視角、結論等",
+            font=("Arial", 8),
+            foreground="gray"
+        )
+        self.ai_summary_info.grid(row=3, column=0, sticky=tk.W, pady=(5, 0))
+        
+        # AI API設定區域
+        api_frame = ttk.LabelFrame(left_frame, text="AI API設定", padding="10")
+        api_frame.grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Label(api_frame, text="OpenAI API Key:").grid(row=0, column=0, sticky=tk.W)
+        self.api_key_entry = ttk.Entry(api_frame, width=40, show="*")
+        self.api_key_entry.grid(row=0, column=1, padx=(10, 0), sticky=(tk.W, tk.E))
+        
+        ttk.Button(api_frame, text="測試連接", command=self.test_api_connection).grid(row=0, column=2, padx=(10, 0))
+        
+        self.api_status_label = ttk.Label(api_frame, text="未設定", foreground="gray")
+        self.api_status_label.grid(row=1, column=0, columnspan=3, pady=(5, 0), sticky=tk.W)
+        
         # 轉換按鈕
-        convert_button = ttk.Button(main_frame, text="開始轉換", command=self.convert_speech_to_text)
-        convert_button.grid(row=6, column=0, columnspan=3, pady=(10, 0))
+        convert_button = ttk.Button(left_frame, text="開始轉換", command=self.convert_speech_to_text)
+        convert_button.grid(row=6, column=0, columnspan=2, pady=(10, 0))
+        
+        # ==================== 右側區域 ====================
         
         # 結果顯示區域
-        result_frame = ttk.LabelFrame(main_frame, text="轉換結果", padding="10")
-        result_frame.grid(row=7, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(10, 0))
+        result_frame = ttk.LabelFrame(right_frame, text="轉換結果", padding="10")
+        result_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         
-        self.text_result = scrolledtext.ScrolledText(result_frame, width=70, height=15)
-        self.text_result.grid(row=0, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.text_result = scrolledtext.ScrolledText(result_frame, width=50, height=20)
+        self.text_result.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # AI摘要結果區域
+        ai_result_frame = ttk.LabelFrame(right_frame, text="AI智能摘要", padding="10")
+        ai_result_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        
+        self.ai_result_text = scrolledtext.ScrolledText(ai_result_frame, width=50, height=12)
+        self.ai_result_text.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # 自定義Prompt區域
+        prompt_frame = ttk.LabelFrame(ai_result_frame, text="自定義分析", padding="5")
+        prompt_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
+        
+        ttk.Label(prompt_frame, text="自定義提示詞:").grid(row=0, column=0, sticky=tk.W)
+        
+        self.custom_prompt_text = scrolledtext.ScrolledText(prompt_frame, width=50, height=3)
+        self.custom_prompt_text.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(5, 10))
+        
+        # 預設提示詞按鈕
+        preset_frame = ttk.Frame(prompt_frame)
+        preset_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Button(preset_frame, text="學術分析", command=lambda: self.load_preset_prompt("academic")).grid(row=0, column=0, padx=(0, 5))
+        ttk.Button(preset_frame, text="商業報告", command=lambda: self.load_preset_prompt("business")).grid(row=0, column=1, padx=(0, 5))
+        ttk.Button(preset_frame, text="會議紀錄", command=lambda: self.load_preset_prompt("meeting")).grid(row=0, column=2, padx=(0, 5))
+        ttk.Button(preset_frame, text="清空", command=self.clear_custom_prompt).grid(row=0, column=3)
+        
+        # AI摘要控制按鈕
+        ai_control_frame = ttk.Frame(ai_result_frame)
+        ai_control_frame.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+        
+        ttk.Button(ai_control_frame, text="標準AI摘要", command=self.generate_ai_summary).grid(row=0, column=0, padx=(0, 10))
+        ttk.Button(ai_control_frame, text="自定義分析", command=self.generate_custom_analysis).grid(row=0, column=1, padx=(0, 10))
+        ttk.Button(ai_control_frame, text="清空摘要", command=self.clear_ai_summary).grid(row=0, column=2)
         
         # 導出按鈕
-        export_frame = ttk.Frame(main_frame)
-        export_frame.grid(row=8, column=0, columnspan=3, pady=(10, 0))
+        export_frame = ttk.Frame(right_frame)
+        export_frame.grid(row=2, column=0, columnspan=2, pady=(10, 0))
         
-        ttk.Button(export_frame, text="導出為TXT", command=self.export_txt).grid(row=0, column=0, padx=(0, 10))
-        ttk.Button(export_frame, text="導出為DOCX", command=self.export_docx).grid(row=0, column=1, padx=(0, 10))
+        ttk.Button(export_frame, text="導出TXT", command=self.export_txt).grid(row=0, column=0, padx=(0, 10))
+        ttk.Button(export_frame, text="導出DOCX", command=self.export_docx).grid(row=0, column=1, padx=(0, 10))
+        ttk.Button(export_frame, text="導出完整報告", command=self.export_full_report).grid(row=0, column=2, padx=(0, 10))
         
         # 重置按鈕
         reset_button = ttk.Button(export_frame, text="重置系統", command=self.reset_program, style="Reset.TButton")
-        reset_button.grid(row=0, column=2)
+        reset_button.grid(row=0, column=3)
         
         # 配置樣式
         style = ttk.Style()
         style.configure("Reset.TButton", foreground="red")
         
-        # 配置權重
+        # 配置權重 - 這是關鍵改善！
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(7, weight=1)
-        result_frame.columnconfigure(0, weight=1)
-        result_frame.rowconfigure(0, weight=1)
         
-        # 配置檔案列表區域權重
+        main_frame.columnconfigure(0, weight=1)  # 左欄
+        main_frame.columnconfigure(1, weight=0)  # 左欄延伸
+        main_frame.columnconfigure(2, weight=1)  # 右欄
+        main_frame.columnconfigure(3, weight=0)  # 右欄延伸
+        main_frame.rowconfigure(1, weight=1)
+        
+        # 左側權重配置
+        left_frame.columnconfigure(0, weight=1)
+        left_frame.columnconfigure(1, weight=0)
+        left_frame.rowconfigure(1, weight=1)  # 檔案管理區域可擴展
+        
+        # 右側權重配置
+        right_frame.columnconfigure(0, weight=1)
+        right_frame.columnconfigure(1, weight=0)
+        right_frame.rowconfigure(0, weight=2)  # 轉換結果區域
+        right_frame.rowconfigure(1, weight=1)  # AI摘要區域
+        
+        # 各區域內部權重配置
+        record_frame.columnconfigure(0, weight=1)
+        upload_frame.columnconfigure(0, weight=1)
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(0, weight=1)
-        upload_frame.columnconfigure(0, weight=1)
+        result_frame.columnconfigure(0, weight=1)
         result_frame.rowconfigure(0, weight=1)
+        ai_result_frame.columnconfigure(0, weight=1)
+        ai_result_frame.rowconfigure(0, weight=1)
+        api_frame.columnconfigure(1, weight=1)
+        
+        # 自定義prompt區域權重配置
+        prompt_frame.columnconfigure(0, weight=1)
+        prompt_frame.rowconfigure(1, weight=1)
     
     def start_recording(self):
         """開始錄音"""
@@ -463,6 +653,406 @@ class SpeechToTextApp:
             print("已啟用時間戳功能")
         else:
             print("已關閉時間戳功能")
+    
+    def toggle_ai_summary_option(self):
+        """切換AI摘要選項"""
+        self.enable_ai_summary = self.ai_summary_var.get()
+        if self.enable_ai_summary:
+            print("已啟用AI摘要功能")
+            if not self.openai_api_key:
+                messagebox.showinfo("提示", "請設定OpenAI API Key以使用AI摘要功能")
+        else:
+            print("已關閉AI摘要功能")
+    
+    def test_api_connection(self):
+        """測試OpenAI API連接"""
+        api_key = self.api_key_entry.get().strip()
+        if not api_key:
+            messagebox.showwarning("警告", "請輸入OpenAI API Key")
+            return
+        
+        try:
+            # 設定API key
+            self.openai_api_key = api_key
+            
+            # 測試連接 - 嘗試導入並測試OpenAI
+            try:
+                import openai
+                
+                # 檢查版本並選擇適當的API調用方式
+                if hasattr(openai, '__version__') and openai.__version__.startswith('1.'):
+                    # OpenAI v1.x
+                    client = openai.OpenAI(api_key=api_key)
+                    response = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[{"role": "user", "content": "Hello"}],
+                        max_tokens=5
+                    )
+                else:
+                    # OpenAI v0.x (舊版)
+                    openai.api_key = api_key
+                    response = openai.ChatCompletion.create(
+                        model="gpt-4o",
+                        messages=[{"role": "user", "content": "Hello"}],
+                        max_tokens=5
+                    )
+                
+                self.api_status_label.config(text="API連接成功", foreground="green")
+                messagebox.showinfo("成功", "OpenAI API連接測試成功！")
+                
+            except ImportError:
+                self.api_status_label.config(text="缺少openai套件", foreground="red")
+                result = messagebox.askyesno("缺少套件", "缺少openai套件，是否要自動安裝？")
+                if result:
+                    self.install_openai_package()
+            
+        except Exception as e:
+            self.api_status_label.config(text="API連接失敗", foreground="red")
+            messagebox.showerror("錯誤", f"API連接失敗：{str(e)}")
+    
+    def install_openai_package(self):
+        """自動安裝OpenAI套件"""
+        try:
+            import subprocess
+            import sys
+            
+            # 在新線程中安裝套件
+            def install_in_thread():
+                try:
+                    subprocess.run([sys.executable, "-m", "pip", "install", "openai"], 
+                                 check=True, capture_output=True, text=True)
+                    self.root.after(0, lambda: messagebox.showinfo("成功", "OpenAI套件安裝成功！請重新測試API連接。"))
+                    self.root.after(0, lambda: self.api_status_label.config(text="套件安裝完成", foreground="blue"))
+                except Exception as e:
+                    self.root.after(0, lambda: messagebox.showerror("錯誤", f"安裝失敗：{str(e)}"))
+                    self.root.after(0, lambda: self.api_status_label.config(text="安裝失敗", foreground="red"))
+            
+            threading.Thread(target=install_in_thread, daemon=True).start()
+            self.api_status_label.config(text="正在安裝套件...", foreground="blue")
+            
+        except Exception as e:
+            messagebox.showerror("錯誤", f"安裝過程中出現錯誤：{str(e)}")
+    
+    def generate_ai_summary(self):
+        """生成AI摘要"""
+        if not self.enable_ai_summary:
+            messagebox.showinfo("提示", "請先啟用AI摘要功能")
+            return
+        
+        if not self.openai_api_key:
+            messagebox.showwarning("警告", "請先設定並測試OpenAI API Key")
+            return
+        
+        # 取得轉換結果文字
+        content = self.text_result.get(1.0, tk.END).strip()
+        if not content:
+            messagebox.showwarning("警告", "沒有轉換結果可以分析")
+            return
+        
+        # 在新線程中執行AI分析
+        threading.Thread(target=self.perform_ai_analysis, args=(content,), daemon=True).start()
+        
+        # 更新狀態
+        self.ai_result_text.delete(1.0, tk.END)
+        self.ai_result_text.insert(tk.END, "正在進行AI分析，請稍候...\n")
+    
+    def perform_ai_analysis(self, content):
+        """執行AI分析"""
+        try:
+            import openai
+            
+            # 構建提示詞
+            prompt = self.build_analysis_prompt(content)
+            
+            # 檢查OpenAI版本並選擇適當的API調用方式
+            if hasattr(openai, '__version__') and openai.__version__.startswith('1.'):
+                # OpenAI v1.x
+                client = openai.OpenAI(api_key=self.openai_api_key)
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "你是一個專業的內容分析助手，擅長分析演講、講座和會議內容。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=2000,
+                    temperature=0.3
+                )
+                analysis_result = response.choices[0].message.content
+            else:
+                # OpenAI v0.x (舊版)
+                openai.api_key = self.openai_api_key
+                response = openai.ChatCompletion.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "你是一個專業的內容分析助手，擅長分析演講、講座和會議內容。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=2000,
+                    temperature=0.3
+                )
+                analysis_result = response.choices[0].message.content
+            
+            # 儲存分析結果
+            self.ai_summary_result = analysis_result
+            
+            # 更新UI
+            self.root.after(0, self.update_ai_result, analysis_result)
+            
+        except Exception as e:
+            error_message = f"AI分析失敗：{str(e)}"
+            print(error_message)
+            self.root.after(0, self.update_ai_result, error_message)
+    
+    def build_analysis_prompt(self, content):
+        """構建AI分析提示詞"""
+        prompt = f"""
+請分析以下演講/講座內容，並提供結構化的摘要分析：
+
+【原始內容】
+{content}
+
+【分析要求】
+請按照以下格式提供詳細分析：
+
+## 📋 內容概覽
+- 內容類型：[講座/演講/會議/討論等]
+- 估計時長：[根據內容長度估計]
+- 語言風格：[正式/非正式/學術/商業等]
+
+## 🎯 主題領域
+- 主要領域：
+- 次要領域：
+- 關鍵議題：
+
+## 🔬 研究方法
+- 研究取向：[理論/實務/混合]
+- 分析方式：[定性/定量/案例研究等]
+- 論證方式：[歸納/演繹/比較分析等]
+
+## 👁️ 研究視角
+- 學術觀點：
+- 實務角度：
+- 批判思維：
+
+## 💡 核心結論
+- 主要發現：
+- 重要觀點：
+- 建議行動：
+
+## 🔗 關鍵概念
+- 重要術語：
+- 核心理論：
+- 引用來源：
+
+## 📊 內容結構
+- 開場方式：
+- 論述邏輯：
+- 結尾總結：
+
+## 💭 補充說明
+- 特色亮點：
+- 可能疑問：
+- 延伸思考：
+
+請用繁體中文回答，保持專業且易懂的語言風格。
+"""
+        return prompt
+    
+    def update_ai_result(self, result):
+        """更新AI分析結果顯示"""
+        self.ai_result_text.delete(1.0, tk.END)
+        self.ai_result_text.insert(tk.END, result)
+    
+    def clear_ai_summary(self):
+        """清空AI摘要"""
+        self.ai_result_text.delete(1.0, tk.END)
+        self.ai_summary_result = ""
+    
+    def load_preset_prompt(self, preset_type):
+        """載入預設提示詞"""
+        presets = {
+            "academic": """請以學術研究的角度分析這段文本，重點關注：
+1. 研究主題和問題
+2. 理論框架和方法論
+3. 主要發現和論證
+4. 學術貢獻和意義
+5. 可能的研究限制
+請提供詳細的學術分析報告。""",
+            
+            "business": """請以商業分析的角度解讀這段內容，包含：
+1. 核心商業議題
+2. 市場機會和挑戰
+3. 策略建議和行動方案
+4. 風險評估
+5. 預期效益和影響
+請提供實用的商業洞察。""",
+            
+            "meeting": """請整理這段會議內容，包括：
+1. 會議重點議題
+2. 主要討論內容
+3. 決議事項和行動計畫
+4. 責任分工
+5. 後續追蹤事項
+請提供結構化的會議紀錄。"""
+        }
+        
+        if preset_type in presets:
+            self.custom_prompt_text.delete(1.0, tk.END)
+            self.custom_prompt_text.insert(1.0, presets[preset_type])
+    
+    def clear_custom_prompt(self):
+        """清空自定義提示詞"""
+        self.custom_prompt_text.delete(1.0, tk.END)
+    
+    def generate_custom_analysis(self):
+        """使用自定義提示詞生成AI分析"""
+        content = self.text_result.get(1.0, tk.END).strip()
+        custom_prompt = self.custom_prompt_text.get(1.0, tk.END).strip()
+        
+        if not content:
+            messagebox.showwarning("警告", "沒有轉換結果可以分析")
+            return
+        
+        if not custom_prompt:
+            messagebox.showwarning("警告", "請輸入自定義提示詞")
+            return
+        
+        if not self.api_key_entry.get().strip():
+            messagebox.showwarning("警告", "請先設定OpenAI API Key")
+            return
+        
+        # 在新線程中執行分析
+        threading.Thread(target=self._perform_custom_analysis, args=(content, custom_prompt), daemon=True).start()
+        
+        # 顯示分析中狀態
+        self.ai_result_text.delete(1.0, tk.END)
+        self.ai_result_text.insert(tk.END, "🤖 正在使用自定義提示詞進行AI分析...\n\n")
+        self.ai_result_text.update()
+    
+    def _perform_custom_analysis(self, content, custom_prompt):
+        """執行自定義AI分析"""
+        try:
+            api_key = self.api_key_entry.get().strip()
+            
+            # 檢查 OpenAI 版本並使用相應的 API
+            try:
+                import openai
+                if hasattr(openai, '__version__') and openai.__version__.startswith('0.'):
+                    # 舊版本 API (0.x)
+                    openai.api_key = api_key
+                    
+                    response = openai.ChatCompletion.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": "你是一個專業的文本分析助手，請根據用戶的要求進行深度分析。"},
+                            {"role": "user", "content": f"{custom_prompt}\n\n以下是要分析的文本內容：\n\n{content}"}
+                        ],
+                        max_tokens=2000,
+                        temperature=0.7
+                    )
+                    
+                    analysis_result = response.choices[0].message.content
+                    
+                else:
+                    # 新版本 API (1.x)
+                    from openai import OpenAI
+                    client = OpenAI(api_key=api_key)
+                    
+                    response = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": "你是一個專業的文本分析助手，請根據用戶的要求進行深度分析。"},
+                            {"role": "user", "content": f"{custom_prompt}\n\n以下是要分析的文本內容：\n\n{content}"}
+                        ],
+                        max_tokens=2000,
+                        temperature=0.7
+                    )
+                    
+                    analysis_result = response.choices[0].message.content
+                
+                # 在主線程中更新UI
+                self.root.after(0, lambda: self.update_custom_analysis_result(analysis_result))
+                
+            except Exception as api_error:
+                error_msg = f"API 調用失敗: {str(api_error)}"
+                self.root.after(0, lambda: self.update_custom_analysis_result(f"❌ {error_msg}"))
+                
+        except Exception as e:
+            error_msg = f"自定義分析失敗: {str(e)}"
+            self.root.after(0, lambda: self.update_custom_analysis_result(f"❌ {error_msg}"))
+    
+    def update_custom_analysis_result(self, result):
+        """更新自定義分析結果"""
+        self.ai_result_text.delete(1.0, tk.END)
+        self.ai_result_text.insert(tk.END, "🎯 自定義AI分析結果\n")
+        self.ai_result_text.insert(tk.END, "=" * 50 + "\n\n")
+        self.ai_result_text.insert(tk.END, result)
+    
+    def export_full_report(self):
+        """導出完整報告（包含原文和AI摘要）"""
+        content = self.text_result.get(1.0, tk.END).strip()
+        ai_summary = self.ai_result_text.get(1.0, tk.END).strip()
+        
+        if not content:
+            messagebox.showwarning("警告", "沒有轉換結果可以導出")
+            return
+        
+        file_path = filedialog.asksaveasfilename(
+            title="儲存完整報告",
+            defaultextension=".docx",
+            filetypes=[("Word檔案", "*.docx"), ("文字檔案", "*.txt"), ("所有檔案", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                if file_path.endswith('.docx'):
+                    self.export_full_docx_report(file_path, content, ai_summary)
+                else:
+                    self.export_full_txt_report(file_path, content, ai_summary)
+                messagebox.showinfo("成功", f"完整報告已導出至: {file_path}")
+            except Exception as e:
+                messagebox.showerror("錯誤", f"導出失敗: {e}")
+    
+    def export_full_docx_report(self, file_path, content, ai_summary):
+        """導出完整DOCX報告"""
+        doc = Document()
+        
+        # 標題
+        doc.add_heading('語音轉文字完整分析報告', 0)
+        doc.add_paragraph(f'生成時間: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+        doc.add_paragraph('-' * 80)
+        
+        # 原始轉換結果
+        doc.add_heading('📝 語音轉文字結果', 1)
+        doc.add_paragraph(content)
+        
+        # AI摘要結果
+        if ai_summary:
+            doc.add_heading('🤖 AI智能摘要分析', 1)
+            doc.add_paragraph(ai_summary)
+        else:
+            doc.add_heading('🤖 AI智能摘要分析', 1)
+            doc.add_paragraph('尚未進行AI分析')
+        
+        doc.save(file_path)
+    
+    def export_full_txt_report(self, file_path, content, ai_summary):
+        """導出完整TXT報告"""
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("語音轉文字完整分析報告\n")
+            f.write(f"生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("=" * 80 + "\n\n")
+            
+            f.write("📝 語音轉文字結果\n")
+            f.write("-" * 40 + "\n")
+            f.write(content + "\n\n")
+            
+            f.write("🤖 AI智能摘要分析\n")
+            f.write("-" * 40 + "\n")
+            if ai_summary:
+                f.write(ai_summary + "\n")
+            else:
+                f.write("尚未進行AI分析\n")
     
     def format_timestamp(self, seconds):
         """格式化時間戳"""
@@ -800,6 +1390,10 @@ class SpeechToTextApp:
             self.root.after(0, self.safe_update_result, final_text)
             self.root.after(0, self.update_record_status, f"批次轉換完成 ({total_files} 個檔案)")
             
+            # 如果啟用AI摘要，自動生成摘要
+            if self.enable_ai_summary and self.openai_api_key:
+                self.root.after(1000, self.generate_ai_summary)  # 延遲1秒後生成摘要
+            
         except Exception as e:
             error_text = f"批次轉換失敗: {e}"
             self.root.after(0, self.update_record_status, error_text)
@@ -1074,16 +1668,19 @@ class SpeechToTextApp:
                     self.root.after(0, self.safe_update_result, formatted_text)
                 else:
                     self.root.after(0, self.safe_update_result, text)
+                
                 self.root.after(0, self.update_record_status, "轉換完成")
+                
+                # 如果啟用AI摘要，自動生成摘要
+                if self.enable_ai_summary and self.openai_api_key:
+                    self.root.after(1000, self.generate_ai_summary)  # 延遲1秒後生成摘要
+                
             else:
                 self.root.after(0, self.safe_update_result, "轉換失敗")
                 self.root.after(0, self.update_record_status, "轉換失敗")
                 
         except Exception as e:
             error_text = f"轉換失敗: {e}"
-            self.root.after(0, self.safe_update_result, error_text)
-            self.root.after(0, self.update_record_status, error_text)
-            print(error_text)
             self.root.after(0, self.safe_update_result, error_text)
             self.root.after(0, self.update_record_status, error_text)
             print(error_text)
