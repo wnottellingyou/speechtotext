@@ -8,8 +8,9 @@ echo - 更好的用戶介面和錯誤處理
 echo.
 
 REM 使用正確的Python路徑
-"C:/Users/蔡昌諺/AppData/Local/Programs/Python/Python310/python.exe" improved_speech_to_text.py
+"C:/Users/AppData/Local/Programs/Python/Python310/python.exe" improved_speech_to_text.py
 
 echo.
 echo 程式已結束
 pause
+
